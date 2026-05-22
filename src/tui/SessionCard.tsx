@@ -41,6 +41,7 @@ const STATE_COLOR: Record<string, string> = {
 const PROVIDER_LABEL: Record<string, string> = {
   claude: 'Claude',
   codex: 'Codex',
+  agy: 'Antigravity',
 };
 
 // --- helpers ---------------------------------------------------------------

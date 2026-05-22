@@ -1,6 +1,6 @@
 # agent-monitor
 
-A Linux TUI that watches every running `claude` and `codex` CLI session on your machine — like `htop` for AI agent sessions. Hooks write per-session events to a spool; an indexer drains them into SQLite; the TUI renders a live grid.
+A Linux TUI that watches every running `claude`, `codex`, and `agy` CLI session on your machine — like `htop` for AI agent sessions. Hooks write per-session events to a spool; an indexer drains them into SQLite; the TUI renders a live grid.
 
 ```
 agent-monitor · 0 needs you · ⏵ 3 waiting · 1 working · 0 idle · density=card
@@ -23,7 +23,7 @@ cd agent-monitor
 agent-monitor tui
 ```
 
-`install.sh` shows you a unified diff for every settings/hooks file it would touch and asks before applying. Two filesystem-only steps don't have prompts (the `~/.local/bin/agent-monitor` symlink and the one-line `codex_hooks = true` flag in `config.toml`); both are tiny and reversible.
+`install.sh` shows you a unified diff for every settings/hooks file it would touch and asks before applying. Two filesystem-only steps don't have prompts (the `~/.local/bin/agent-monitor` symlink and the one-line `hooks = true` flag in `config.toml`); both are tiny and reversible.
 
 Pass `--yes` to auto-accept every diff (CI / scripted). Diffs still print to stdout so you can audit the log. Pass `--help` to see exactly what it touches.
 
@@ -35,8 +35,9 @@ If `agent-monitor tui` reports "command not found", `~/.local/bin` isn't on your
 |---|---|
 | `~/.claude/settings.json` | Hook entries merged in. Backup left as `.bak.<utc-iso>`. Existing keys/hooks preserved. |
 | `~/.codex/hooks.json` | Hook entries merged. Same backup convention. |
-| `~/.codex/config.toml` | Sets `[features] codex_hooks = true`. Backup left. |
-| `~/.local/share/agent-monitor/hooks/` | The two shell scripts the hook commands invoke. |
+| `~/.codex/config.toml` | Sets `[features] hooks = true`. Backup left. |
+| `~/.gemini/config/hooks.json` | Hook entries merged. Same backup convention. |
+| `~/.local/share/agent-monitor/hooks/` | The hook scripts the hook commands invoke. |
 | `~/.local/bin/agent-monitor` | Symlink to `bin/agent-monitor` in this clone. |
 | `~/.local/state/agent-monitor/` | SQLite `events.db`, JSONL spool, `tui.log`. Created on first event. |
 
@@ -47,13 +48,13 @@ The installer only writes these paths. Uninstall removes the Claude hook entries
 - Linux (uses `/proc`, `sha1sum`, `date +%s%3N`)
 - [Bun](https://bun.sh) ≥ 1.3
 - `jq` (hook scripts use it for session-id extraction)
-- [Claude Code](https://docs.claude.com/en/docs/claude-code) and/or [Codex CLI](https://github.com/openai/codex) ≥ 0.125
+- [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex) ≥ 0.125, and/or `agy`
 
 ## How it works
 
 ```
 ┌──────────────────┐    ┌──────────────────┐
-│ Claude Code hook │    │   Codex hook     │   shell scripts that
+│ Claude Code hook │    │ Codex/Agy hook   │   shell scripts that
 │  (shell script)  │    │  (shell script)  │   append one JSON line
 └────────┬─────────┘    └────────┬─────────┘   per agent event
          │                       │
@@ -135,10 +136,11 @@ agent-monitor install-hooks --uninstall # remove our entries from ~/.claude/sett
 | `~/.local/state/agent-monitor/spool/<provider>/<sha1>/YYYYMMDD.jsonl` | Per-session hook spool |
 | `~/.local/state/agent-monitor/indexer.lock` | Single-writer election lock |
 | `~/.local/state/agent-monitor/tui.log` | TUI log (never goes to stdout) |
-| `~/.local/share/agent-monitor/hooks/{claude,codex}-hook.sh` | Installed hook scripts |
+| `~/.local/share/agent-monitor/hooks/{claude,codex,agy}-hook.sh` | Installed hook scripts |
 | `~/.claude/settings.json` | Modified to register Claude hooks (with backup) |
 | `~/.codex/hooks.json` | Modified to register Codex hooks (with backup) |
-| `~/.codex/config.toml` | `[features] codex_hooks = true` ensured |
+| `~/.codex/config.toml` | `[features] hooks = true` ensured |
+| `~/.gemini/config/hooks.json` | Modified to register Agy hooks (with backup) |
 
 The hook scripts append to JSONL spool files at sub-millisecond cost. The writer-elected indexer drains the spool every ~1 s and reconciles rollouts every ~8 s.
 
@@ -148,7 +150,9 @@ The hook scripts append to JSONL spool files at sub-millisecond cost. The writer
 agent-monitor install-hooks --uninstall   # remove our entries from ~/.claude/settings.json
 # ~/.codex/hooks.json — open the file and delete entries whose `command` contains
 #   ~/.local/share/agent-monitor/hooks/ (the file may be shared with other tools).
-# ~/.codex/config.toml — remove `codex_hooks = true` under [features] if you want.
+# ~/.codex/config.toml — remove `hooks = true` under [features] if you want.
+# ~/.gemini/config/hooks.json — delete entries whose `command` contains
+#   ~/.local/share/agent-monitor/hooks/ (the file may be shared with other tools).
 rm -rf ~/.local/state/agent-monitor       # data: events.db, spool, tui.log
 rm -rf ~/.local/share/agent-monitor       # deployed hook scripts
 rm ~/.local/bin/agent-monitor             # PATH symlink
@@ -161,7 +165,7 @@ The Claude uninstall preserves any non-agent-monitor hooks you added independent
 - **No sessions after install.** Sessions started *before* the hook install have no `SessionStart` event but the reconciler picks them up within ~10 s of opening the TUI. If nothing shows: `agent-monitor reconcile`.
 - **Sessions stuck in `tool` state.** A `PostToolUse` hook didn't fire (e.g. agent crashed mid-tool). They flip to `done` as soon as `/proc` stops proving the process alive *and* the 120 s event-freshness grace expires.
 - **`jq: command not found`** in spool data. Install jq. The hook falls back to a sed parser but jq is more reliable.
-- **Hook fires don't appear.** Check the `hooks` block in `~/.claude/settings.json` / `~/.codex/hooks.json`. Re-run `./install.sh` if missing.
+- **Hook fires don't appear.** Check the `hooks` block in `~/.claude/settings.json`, `~/.codex/hooks.json`, or `~/.gemini/config/hooks.json`. Re-run `./install.sh` if missing.
 - **`agent-monitor doctor` is the first stop** for any "is it working" question.
 
 ## Non-goals (v1)
@@ -175,14 +179,14 @@ The Claude uninstall preserves any non-agent-monitor hooks you added independent
 ## Development
 
 ```bash
-bun test               # 85 tests
+bun test               # 92 tests
 bun run typecheck      # tsc --noEmit
 bun run src/cli.ts tui # run from source
 ```
 
 Project layout follows the architecture diagram one-to-one (`src/store/`, `src/indexer/`, `src/reconciler/`, `src/tui/`). Hot paths:
 
-- `src/indexer/spool.ts` and `src/reconciler/{claude,codex}.ts` — only writers to `events.db`
+- `src/indexer/spool.ts` and `src/reconciler/{claude,codex}.ts` — only writers to `events.db` today
 - `src/store/queries.ts` — single home for SQL
 - `src/state-machine.ts` — event-driven state at ingest; `src/liveness.ts` overlays /proc liveness + freshness grace at read time
 - `src/tui/store.ts` — Zustand `applyDiff` returns stable Map ref when nothing changed, so `React.memo`'d cells skip re-render

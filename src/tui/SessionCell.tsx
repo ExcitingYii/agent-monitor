@@ -12,7 +12,7 @@ import Spinner from 'ink-spinner';
 import path from 'node:path';
 import type { SessionRow } from '../types.ts';
 
-const PROVIDER_ICON: Record<string, string> = { claude: 'C', codex: 'X' };
+const PROVIDER_ICON: Record<string, string> = { claude: 'C', codex: 'X', agy: 'A' };
 const STATE_COLOR: Record<string, string> = {
   thinking: 'cyan',
   tool: 'yellow',

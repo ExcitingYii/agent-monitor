@@ -40,9 +40,15 @@ const ALIVE_CACHE_MS = 3000;
 interface AliveCache {
   claude: Set<string>;
   codex: Set<string>;
+  agy: Set<string>;
 }
 let aliveCache: AliveCache | null = null;
 let aliveCacheExpiresAt = 0;
+
+export function resetAliveCacheForTests(): void {
+  aliveCache = null;
+  aliveCacheExpiresAt = 0;
+}
 
 // /proc/<pid>/fd readlinks we recognize:
 //   /home/<user>/.claude/tasks/<session_id>/.lock           (Claude session marker)
@@ -55,12 +61,15 @@ const CLAUDE_LOCK_RE = new RegExp(`/\\.claude/tasks/(${UUID_RE_SRC})/\\.lock$`);
 const CODEX_ROLLOUT_RE = new RegExp(
   `/\\.codex/sessions/[^ ]+/rollout-[^/]+-(${UUID_RE_SRC})\\.jsonl$`,
 );
+const AGY_CONVERSATION_RE = new RegExp(
+  `/\\.gemini/antigravity-cli/conversations/(${UUID_RE_SRC})\\.(pb|tmp)$`,
+);
 
 function refreshAliveCache(): void {
   const now = Date.now();
   if (aliveCache && aliveCacheExpiresAt > now) return;
 
-  const cache: AliveCache = { claude: new Set(), codex: new Set() };
+  const cache: AliveCache = { claude: new Set(), codex: new Set(), agy: new Set() };
   let pids: string[];
   try {
     pids = readdirSync('/proc');
@@ -82,19 +91,23 @@ function refreshAliveCache(): void {
     } catch {
       continue;
     }
-    if (comm !== 'claude' && comm !== 'codex') continue;
+    if (comm !== 'claude' && comm !== 'codex' && comm !== 'agy' && comm !== 'antigravity-cli') continue;
 
-    // Resumed sessions (`claude --resume <sid>` or `codex --resume <sid>`)
+    // Resumed sessions (`claude --resume <sid>` or `codex --resume <sid>` or `agy --conversation <sid>`)
     // don't create a new lock file and don't keep their rollout fd open
     // persistently, so we'd miss them via the fd walk alone. Parse cmdline.
     try {
       const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
       const args = raw.split('\0');
       for (let i = 0; i < args.length - 1; i++) {
-        if (args[i] === '--resume' && UUID_TOKEN_RE.test(args[i + 1] ?? '')) {
+        if (
+          (args[i] === '--resume' || args[i] === '--conversation') &&
+          UUID_TOKEN_RE.test(args[i + 1] ?? '')
+        ) {
           const sid = args[i + 1]!;
           if (comm === 'claude') cache.claude.add(sid);
-          else cache.codex.add(sid);
+          else if (comm === 'codex') cache.codex.add(sid);
+          else cache.agy.add(sid);
           break;
         }
       }
@@ -117,7 +130,12 @@ function refreshAliveCache(): void {
           continue;
         }
         const xm = CODEX_ROLLOUT_RE.exec(link);
-        if (xm) cache.codex.add(xm[1]!);
+        if (xm) {
+          cache.codex.add(xm[1]!);
+          continue;
+        }
+        const am = AGY_CONVERSATION_RE.exec(link);
+        if (am) cache.agy.add(am[1]!);
       } catch {
         // fd vanished mid-walk; ignore.
       }
@@ -138,6 +156,12 @@ export function isCodexSessionAlive(sessionId: string): boolean {
   if (!sessionId) return false;
   refreshAliveCache();
   return aliveCache!.codex.has(sessionId);
+}
+
+export function isAgySessionAlive(sessionId: string): boolean {
+  if (!sessionId) return false;
+  refreshAliveCache();
+  return aliveCache!.agy.has(sessionId);
 }
 
 // Tunables, exposed as constants for easy adjustment / test parameterization.
@@ -212,6 +236,7 @@ export function deriveLiveState(
 export function applyLiveness(row: SessionRow, nowMs: number): SessionState {
   const proven =
     (row.provider === 'claude' && isClaudeSessionAlive(row.session_id)) ||
-    (row.provider === 'codex' && isCodexSessionAlive(row.session_id));
+    (row.provider === 'codex' && isCodexSessionAlive(row.session_id)) ||
+    (row.provider === 'agy' && isAgySessionAlive(row.session_id));
   return deriveLiveState(row, nowMs, proven);
 }

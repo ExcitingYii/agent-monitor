@@ -28,6 +28,11 @@ export const PATHS = {
   codexSessions: path.join(HOME, '.codex', 'sessions'),
   codexConfig: path.join(HOME, '.codex', 'config.toml'),
   codexHooks: path.join(HOME, '.codex', 'hooks.json'),
+
+  // Agy locations.
+  agySessions: path.join(HOME, '.gemini', 'antigravity-cli', 'conversations'),
+  agySettings: path.join(HOME, '.gemini', 'antigravity-cli', 'settings.json'),
+  agyHooks: path.join(HOME, '.gemini', 'config', 'hooks.json'),
 } as const;
 
 // 16-char sha1 prefix; collision risk is acceptable for path partitioning.

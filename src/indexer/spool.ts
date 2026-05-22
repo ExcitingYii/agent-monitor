@@ -1,5 +1,5 @@
 // Spool tailer. Discovers per-session spool files under
-//   <PATHS.spool>/{claude,codex}/<session_hash>/YYYYMMDD.jsonl
+//   <PATHS.spool>/<provider>/<session_hash>/YYYYMMDD.jsonl
 // resumes each file by byte offset (looked up from `events`), parses one
 // HookEnvelope per line, runs it through the reducer, and persists.
 //

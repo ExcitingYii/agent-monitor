@@ -173,7 +173,7 @@ export function installPlanFiles(): void {
     throw new Error('could not locate hooks/ directory relative to install.ts');
   }
   fs.mkdirSync(PATHS.hooks, { recursive: true });
-  for (const name of ['claude-hook.sh', 'codex-hook.sh']) {
+  for (const name of ['claude-hook.sh', 'codex-hook.sh', 'agy-hook.sh']) {
     const src = path.join(hooksSrcDir, name);
     const dst = path.join(PATHS.hooks, name);
     fs.copyFileSync(src, dst);
@@ -189,7 +189,8 @@ function findRepoHooksDir(): string | null {
     const candidate = path.join(dir, 'hooks');
     if (
       fs.existsSync(path.join(candidate, 'claude-hook.sh')) &&
-      fs.existsSync(path.join(candidate, 'codex-hook.sh'))
+      fs.existsSync(path.join(candidate, 'codex-hook.sh')) &&
+      fs.existsSync(path.join(candidate, 'agy-hook.sh'))
     ) {
       return candidate;
     }

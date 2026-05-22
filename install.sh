@@ -2,14 +2,15 @@
 # agent-monitor installer.
 #
 # Bootstraps a fresh clone into a working `agent-monitor tui`:
-#   1. Pre-flight (bun, jq, Linux; warn-only for claude/codex)
+#   1. Pre-flight (bun, jq, Linux; warn-only for claude/codex/agy)
 #   2. bun install
 #   3. Claude hooks   -> delegates to `bun run src/cli.ts install-hooks`
 #                       (preserves its native diff + y/N prompt)
 #   4. Codex hooks    -> writes ~/.codex/hooks.json (merge-aware via jq)
-#                       and toggles [features] codex_hooks = true in config.toml
-#   5. Symlink bin/agent-monitor into ~/.local/bin (idempotent)
-#   6. agent-monitor doctor
+#                       and toggles [features] hooks = true in config.toml
+#   5. Agy hooks      -> writes ~/.gemini/config/hooks.json (merge-aware via jq)
+#   6. Symlink bin/agent-monitor into ~/.local/bin (idempotent)
+#   7. agent-monitor doctor
 #
 # Re-runnable: each step is idempotent. Atomic file writes everywhere; backups
 # stamped with UTC ISO time. No broad rollback — failed steps leave the prior
@@ -45,7 +46,8 @@ Bootstraps agent-monitor on a fresh Linux box. Each step is idempotent.
 What it touches on your system:
   - merges hook entries into  ~/.claude/settings.json   (backup left alongside)
   - writes/merges             ~/.codex/hooks.json       (backup if present)
-  - sets codex_hooks = true   ~/.codex/config.toml      (backup if present)
+  - sets hooks = true         ~/.codex/config.toml      (backup if present)
+  - writes/merges             ~/.gemini/config/hooks.json (backup if present)
   - copies hook scripts to    ~/.local/share/agent-monitor/hooks/
   - symlinks                  ~/.local/bin/agent-monitor -> bin/agent-monitor
   - state dir created lazily  ~/.local/state/agent-monitor/  (events.db, spool, log)
@@ -105,11 +107,13 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 ok "jq $(jq --version)"
 
-HAVE_CLAUDE=0; HAVE_CODEX=0
+HAVE_CLAUDE=0; HAVE_CODEX=0; HAVE_AGY=0
 if command -v claude >/dev/null 2>&1; then HAVE_CLAUDE=1; ok "claude $(claude --version 2>/dev/null | head -1)"; fi
 if command -v codex  >/dev/null 2>&1; then HAVE_CODEX=1;  ok "codex $(codex --version 2>/dev/null | head -1)"; fi
+if command -v agy    >/dev/null 2>&1; then HAVE_AGY=1;    ok "agy $(agy --help 2>&1 | head -1 || echo 'found')"; fi
 if [ "$HAVE_CLAUDE" -eq 0 ]; then warn "claude not on PATH — Claude hooks will install but stay inert"; fi
 if [ "$HAVE_CODEX"  -eq 0 ]; then warn "codex not on PATH  — Codex hooks will install but stay inert"; fi
+if [ "$HAVE_AGY"    -eq 0 ]; then warn "agy not on PATH    — Agy hooks will install but stay inert"; fi
 
 # ---- 2. bun install -------------------------------------------------------
 say "bun install"
@@ -237,40 +241,135 @@ else
   fi
 fi
 
-# Codex feature flag. Stable (default-on) in CLI 0.125+, but the official docs
-# still gate hooks on it — toggling is idempotent and protects older CLIs.
+# Codex feature flag. The old name was `codex_hooks`; new Codex warns on it.
+# Keep the install idempotent by migrating the legacy key to `hooks`.
 if [ -e "$CODEX_CONFIG" ]; then
-  if grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$CODEX_CONFIG"; then
-    dim "codex_hooks = true already present in $CODEX_CONFIG"
+  if grep -qE '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true' "$CODEX_CONFIG" \
+     && ! grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=' "$CODEX_CONFIG"; then
+    dim "hooks = true already present in $CODEX_CONFIG"
   else
     SECTIONS="$(grep -cE '^\[features\]([[:space:]]|$|#)' "$CODEX_CONFIG" || true)"
     if [ "${SECTIONS:-0}" -gt 1 ]; then
       err "$CODEX_CONFIG has multiple [features] sections — refusing to edit. Add manually:"
       err "  [features]"
-      err "  codex_hooks = true"
+      err "  hooks = true"
     elif [ "${SECTIONS:-0}" -eq 1 ]; then
       cp -p "$CODEX_CONFIG" "${CODEX_CONFIG}.bak.$(stamp)"
       awk '
-        BEGIN { inserted = 0 }
-        /^\[features\]([[:space:]]|$|#)/ && !inserted {
+        BEGIN { in_features = 0; saw_hooks = 0 }
+        /^\[/ {
+          if (in_features && !saw_hooks) print "hooks = true"
+          in_features = ($0 ~ /^\[features\]([[:space:]]|$|#)/)
+          saw_hooks = 0
           print
-          print "codex_hooks = true"
-          inserted = 1
+          next
+        }
+        in_features && /^[[:space:]]*codex_hooks[[:space:]]*=/ { next }
+        in_features && /^[[:space:]]*hooks[[:space:]]*=/ {
+          if (!saw_hooks) print "hooks = true"
+          saw_hooks = 1
           next
         }
         { print }
+        END {
+          if (in_features && !saw_hooks) print "hooks = true"
+        }
       ' "$CODEX_CONFIG" > "${CODEX_CONFIG}.tmp"
       mv "${CODEX_CONFIG}.tmp" "$CODEX_CONFIG"
-      ok "added codex_hooks = true under existing [features] in $CODEX_CONFIG"
+      ok "ensured hooks = true under existing [features] in $CODEX_CONFIG"
     else
       cp -p "$CODEX_CONFIG" "${CODEX_CONFIG}.bak.$(stamp)"
-      printf '\n[features]\ncodex_hooks = true\n' >> "$CODEX_CONFIG"
-      ok "appended [features] codex_hooks = true to $CODEX_CONFIG"
+      printf '\n[features]\nhooks = true\n' >> "$CODEX_CONFIG"
+      ok "appended [features] hooks = true to $CODEX_CONFIG"
     fi
   fi
 else
-  printf '[features]\ncodex_hooks = true\n' > "$CODEX_CONFIG"
-  ok "created $CODEX_CONFIG with codex_hooks = true"
+  printf '[features]\nhooks = true\n' > "$CODEX_CONFIG"
+  ok "created $CODEX_CONFIG with hooks = true"
+fi
+
+# ---- 4b. Agy hooks -------------------------------------------------------
+say "Agy hooks (~/.gemini/config/hooks.json)"
+
+AGY_DIR="$HOME/.gemini/config"
+AGY_HOOKS_FILE="$AGY_DIR/hooks.json"
+AGY_HOOK="$HOOKS_DIR/agy-hook.sh"
+
+if [ ! -x "$AGY_HOOK" ]; then
+  err "$AGY_HOOK is missing. Step 3 (deploy hook scripts) didn't run or was rolled back."
+  err "Re-run install.sh, or hand-copy hooks/agy-hook.sh into ~/.local/share/agent-monitor/hooks/"
+  exit 1
+fi
+
+mkdir -p "$AGY_DIR"
+
+build_agy_json() {
+  jq -n --arg s "$AGY_HOOK" '
+    def events: ["SessionStart","UserPromptSubmit","PreToolUse","PostToolUse","PermissionRequest","Stop"];
+    {
+      hooks: (
+        events
+        | map({key: ., value: [{hooks: [{type: "command", command: ($s + " agy " + .)}]}]})
+        | from_entries
+      )
+    }'
+}
+
+merge_agy_json() {
+  local existing="$1"
+  jq --arg s "$AGY_HOOK" --arg dir "$HOOKS_DIR" '
+    def events: ["SessionStart","UserPromptSubmit","PreToolUse","PostToolUse","PermissionRequest","Stop"];
+    def is_ours(h): ((h.command // "") | tostring | contains($dir));
+    .hooks //= {} |
+    .hooks = (
+      reduce events[] as $ev (.hooks;
+        ( .[$ev] // [] ) as $groups |
+        ( [ $groups[]
+            | .hooks = ((.hooks // []) | map(select(is_ours(.) | not)))
+            | select((.hooks | length) > 0) ] ) as $cleaned |
+        .[$ev] = ( $cleaned + [{hooks: [{type: "command", command: ($s + " agy " + $ev)}]}] )
+      )
+    )
+  ' <<<"$existing"
+}
+
+if [ -e "$AGY_HOOKS_FILE" ]; then
+  EXISTING="$(cat "$AGY_HOOKS_FILE")"
+  if ! printf '%s' "$EXISTING" | jq -e . >/dev/null 2>&1; then
+    err "$AGY_HOOKS_FILE is not valid JSON. Refusing to overwrite — move it aside and rerun."
+    exit 1
+  fi
+  NEXT="$(merge_agy_json "$EXISTING")"
+else
+  EXISTING=""
+  NEXT="$(build_agy_json)"
+fi
+
+CURRENT_NORM=""
+if [ -n "$EXISTING" ]; then
+  CURRENT_NORM="$(printf '%s' "$EXISTING" | jq .)"
+fi
+
+if [ "$CURRENT_NORM" = "$NEXT" ]; then
+  dim "$AGY_HOOKS_FILE already up to date"
+else
+  if [ -e "$AGY_HOOKS_FILE" ]; then
+    diff -u --label "$AGY_HOOKS_FILE" --label "$AGY_HOOKS_FILE (proposed)" \
+      <(printf '%s\n' "$CURRENT_NORM") <(printf '%s\n' "$NEXT") || true
+  else
+    dim "(creating new file: $AGY_HOOKS_FILE)"
+    printf '%s\n' "$NEXT"
+  fi
+  if confirm "Apply this change to $AGY_HOOKS_FILE?"; then
+    if [ -e "$AGY_HOOKS_FILE" ]; then
+      cp -p "$AGY_HOOKS_FILE" "${AGY_HOOKS_FILE}.bak.$(stamp)"
+    fi
+    printf '%s\n' "$NEXT" > "${AGY_HOOKS_FILE}.tmp"
+    mv "${AGY_HOOKS_FILE}.tmp" "$AGY_HOOKS_FILE"
+    ok "wrote $AGY_HOOKS_FILE"
+  else
+    warn "skipped Agy hooks.json"
+  fi
 fi
 
 # ---- 5. PATH symlink ------------------------------------------------------

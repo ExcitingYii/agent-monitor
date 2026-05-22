@@ -1,7 +1,7 @@
 // Shared types across indexer, reconciler, state machine, and TUI.
 // Single source of truth — agents working on different milestones import from here.
 
-export type Provider = 'claude' | 'codex';
+export type Provider = 'claude' | 'codex' | 'agy';
 
 // Normalized event kinds — small closed set both providers map into.
 // `thinking` is a derived state, not an event kind (see plan: dropped `assistant_thinking`).
@@ -27,7 +27,7 @@ export type SessionState =
   | 'done'
   | 'recovered';
 
-// Hook envelope written to per-session spool files by hooks/{claude,codex}-hook.sh.
+// Hook envelope written to per-session spool files by provider hook scripts.
 export interface HookEnvelope {
   provider: Provider;
   event: string; // raw hook event name: 'PreToolUse', 'Stop', 'UserPromptSubmit', ...

@@ -8,6 +8,8 @@ build/
 
 # Claude Code per-project settings — local to each clone.
 .claude/
+.omc/
+
 
 # Bun lockfile is committed (bun.lock). Old binary lockfile is not.
 bun.lockb

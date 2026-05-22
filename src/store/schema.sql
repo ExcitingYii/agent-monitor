@@ -6,7 +6,7 @@ PRAGMA synchronous = NORMAL;
 
 CREATE TABLE IF NOT EXISTS sessions (
   key                      TEXT PRIMARY KEY,    -- provider ':' session_id ':' transcript_path_hash
-  provider                 TEXT NOT NULL,       -- 'claude' | 'codex'
+  provider                 TEXT NOT NULL,       -- 'claude' | 'codex' | 'agy'
   session_id               TEXT NOT NULL,
   transcript_path          TEXT,
   cwd                      TEXT,

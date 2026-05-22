@@ -282,6 +282,7 @@ async function cmdDoctor(): Promise<number> {
   // null means "settings file missing or unreadable" -> not installed.
   const claudeCount = countOurHooksInJson(PATHS.claudeSettings);
   const codexCount = countOurHooksInJson(PATHS.codexHooks);
+  const agyCount = countOurHooksInJson(PATHS.agyHooks);
   console.log('hooks:');
   console.log(
     `  claude: ${
@@ -298,6 +299,15 @@ async function cmdDoctor(): Promise<number> {
         ? 'not installed'
         : codexCount > 0
           ? `installed (${codexCount} events)`
+          : 'settings present but no entries pointing at our scripts'
+    }`,
+  );
+  console.log(
+    `  agy:    ${
+      agyCount == null
+        ? 'not installed'
+        : agyCount > 0
+          ? `installed (${agyCount} events)`
           : 'settings present but no entries pointing at our scripts'
     }`,
   );
