@@ -16,6 +16,19 @@
 import { readdirSync, readlinkSync, readFileSync } from 'node:fs';
 import type { SessionRow, SessionState } from './types.ts';
 
+interface LivenessFs {
+  readdirSync: typeof readdirSync;
+  readFileSync: typeof readFileSync;
+  readlinkSync: typeof readlinkSync;
+}
+
+let fsImpl: LivenessFs = { readdirSync, readFileSync, readlinkSync };
+
+export function setLivenessFsForTests(fs: LivenessFs | null): void {
+  fsImpl = fs ?? { readdirSync, readFileSync, readlinkSync };
+  resetAliveCacheForTests();
+}
+
 // Authoritative session-end check for Claude.
 //
 // Claude Code creates `~/.claude/tasks/<session_id>/.lock` *lazily* — empirically
@@ -65,6 +78,33 @@ const AGY_CONVERSATION_RE = new RegExp(
   `/\\.gemini/antigravity-cli/conversations/(${UUID_RE_SRC})\\.(pb|tmp)$`,
 );
 
+function procStarttime(pid: number): number | null {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  let stat: string;
+  try {
+    stat = fsImpl.readFileSync(`/proc/${pid}/stat`, 'utf-8') as string;
+  } catch {
+    return null;
+  }
+  const endComm = stat.lastIndexOf(') ');
+  if (endComm === -1) return null;
+  // Fields after ") " start with field 3 (state). Field 22 is therefore the
+  // 20th token in this suffix, index 19 in a zero-based array.
+  const fields = stat.slice(endComm + 2).trim().split(/\s+/);
+  const raw = fields[19];
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function isObservedParentAlive(
+  pid: number | null,
+  starttime: number | null,
+): boolean {
+  if (pid == null || starttime == null) return false;
+  return procStarttime(pid) === starttime;
+}
+
 function refreshAliveCache(): void {
   const now = Date.now();
   if (aliveCache && aliveCacheExpiresAt > now) return;
@@ -72,7 +112,7 @@ function refreshAliveCache(): void {
   const cache: AliveCache = { claude: new Set(), codex: new Set(), agy: new Set() };
   let pids: string[];
   try {
-    pids = readdirSync('/proc');
+    pids = fsImpl.readdirSync('/proc') as string[];
   } catch {
     aliveCache = cache;
     aliveCacheExpiresAt = now + ALIVE_CACHE_MS;
@@ -87,7 +127,7 @@ function refreshAliveCache(): void {
     if (!/^\d+$/.test(pid)) continue;
     let comm: string;
     try {
-      comm = readFileSync(`/proc/${pid}/comm`, 'utf-8').trim();
+      comm = (fsImpl.readFileSync(`/proc/${pid}/comm`, 'utf-8') as string).trim();
     } catch {
       continue;
     }
@@ -97,7 +137,7 @@ function refreshAliveCache(): void {
     // don't create a new lock file and don't keep their rollout fd open
     // persistently, so we'd miss them via the fd walk alone. Parse cmdline.
     try {
-      const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
+      const raw = fsImpl.readFileSync(`/proc/${pid}/cmdline`, 'utf-8') as string;
       const args = raw.split('\0');
       for (let i = 0; i < args.length - 1; i++) {
         if (
@@ -117,13 +157,13 @@ function refreshAliveCache(): void {
 
     let fds: string[];
     try {
-      fds = readdirSync(`/proc/${pid}/fd`);
+      fds = fsImpl.readdirSync(`/proc/${pid}/fd`) as string[];
     } catch {
       continue;
     }
     for (const fd of fds) {
       try {
-        const link = readlinkSync(`/proc/${pid}/fd/${fd}`);
+        const link = fsImpl.readlinkSync(`/proc/${pid}/fd/${fd}`) as string;
         const cm = CLAUDE_LOCK_RE.exec(link);
         if (cm) {
           cache.claude.add(cm[1]!);
@@ -235,6 +275,7 @@ export function deriveLiveState(
 // tests should hit deriveLiveState or deriveDisplayState directly.
 export function applyLiveness(row: SessionRow, nowMs: number): SessionState {
   const proven =
+    isObservedParentAlive(row.observed_parent_pid, row.observed_parent_starttime) ||
     (row.provider === 'claude' && isClaudeSessionAlive(row.session_id)) ||
     (row.provider === 'codex' && isCodexSessionAlive(row.session_id)) ||
     (row.provider === 'agy' && isAgySessionAlive(row.session_id));

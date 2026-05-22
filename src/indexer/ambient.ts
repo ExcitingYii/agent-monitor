@@ -23,6 +23,10 @@
 
 import { drainOnce as defaultDrainOnce, type DrainStats } from './spool.ts';
 import {
+  discoverProcSessionsOnce as defaultDiscoverProcSessionsOnce,
+  type ProcDiscoveryStats,
+} from './proc-discovery.ts';
+import {
   runReconcileOnce as defaultRunReconcileOnce,
   type ReconcileStats,
 } from '../reconciler/index.ts';
@@ -66,6 +70,7 @@ export interface AmbientOptions {
   // Test seams: inject alternate drain / reconcile callables. Production
   // code never sets these -- they default to the real implementations.
   drainFn?: () => Promise<DrainStats>;
+  procDiscoveryFn?: () => Promise<ProcDiscoveryStats>;
   reconcileFn?: () => Promise<ReconcileStats>;
   // Skip the writer-lock check (used by tests to exercise the drain logic
   // without touching the real ~/.local/state/agent-monitor/indexer.lock).
@@ -96,6 +101,7 @@ export function startAmbientIndexer(opts: AmbientOptions = {}): AmbientHandle {
   const reconcileEvery = opts.reconcileIntervalMs ?? 8000;
   const onStatus = opts.onStatus;
   const drain = opts.drainFn ?? defaultDrainOnce;
+  const procDiscovery = opts.procDiscoveryFn ?? defaultDiscoverProcSessionsOnce;
   const reconcile = opts.reconcileFn ?? defaultRunReconcileOnce;
   const bypassLock = opts.bypassWriterLock ?? false;
 
@@ -148,6 +154,7 @@ export function startAmbientIndexer(opts: AmbientOptions = {}): AmbientHandle {
           return;
         }
         const s = await drain();
+        await procDiscovery();
         status.lastDrainAt = Date.now();
         status.lastDrainStats = s;
         status.drainBacklogLines = s.linesIngested;

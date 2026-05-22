@@ -48,8 +48,9 @@ function seedEvents(dbPath: string, sessionKey: string, count: number, atMs: num
     `INSERT OR IGNORE INTO sessions (
       key, provider, session_id, transcript_path, cwd, model, cli_version,
       pid, process_start_unix, started_at_ms, last_event_at_ms,
-      prior_state, state, current_tool, last_prompt
-    ) VALUES (?, 'claude', ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, 'thinking', NULL, NULL)`,
+      prior_state, state, current_tool, last_prompt, observed_parent_pid,
+      observed_parent_starttime
+    ) VALUES (?, 'claude', ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, 'thinking', NULL, NULL, NULL, NULL)`,
   ).run(sessionKey, sessionKey, atMs, atMs);
 
   const insert = db.prepare(

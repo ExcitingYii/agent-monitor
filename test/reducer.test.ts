@@ -80,6 +80,8 @@ function makeStore() {
       last_prompt: patch.last_prompt ?? existing?.last_prompt ?? null,
       observed_parent_pid:
         patch.observed_parent_pid ?? existing?.observed_parent_pid ?? null,
+      observed_parent_starttime:
+        patch.observed_parent_starttime ?? existing?.observed_parent_starttime ?? null,
       origin: existing?.origin ?? null,
       context_tokens_used: existing?.context_tokens_used ?? null,
       context_tokens_max: existing?.context_tokens_max ?? null,
@@ -111,6 +113,7 @@ function runFixture(name: string, expected: ExpectedStep[]): void {
       source: 'hook',
       lookup: store.lookup,
       findBySid: store.findBySid as never,
+      markProcDone: () => 0,
     });
     expect(reduced).not.toBeNull();
     if (!reduced) continue;
@@ -199,7 +202,11 @@ describe('reducer: notification disambiguation', () => {
       observed_at_ms: 1,
       payload: { permission_request: { tool: 'Bash' } },
     };
-    const r = reduce(env, '/tmp/x.jsonl', 0, { lookup: () => null, findBySid: () => null });
+    const r = reduce(env, '/tmp/x.jsonl', 0, {
+      lookup: () => null,
+      findBySid: () => null,
+      markProcDone: () => 0,
+    });
     expect(r?.event.kind).toBe('permission_request');
   });
 
@@ -211,7 +218,11 @@ describe('reducer: notification disambiguation', () => {
       observed_at_ms: 1,
       payload: { type: 'idle', message: 'Claude is waiting' },
     };
-    const r = reduce(env, '/tmp/x.jsonl', 0, { lookup: () => null, findBySid: () => null });
+    const r = reduce(env, '/tmp/x.jsonl', 0, {
+      lookup: () => null,
+      findBySid: () => null,
+      markProcDone: () => 0,
+    });
     expect(r?.event.kind).toBe('user_attention');
   });
 });
@@ -226,7 +237,11 @@ describe('reducer: session_resume on existing key', () => {
       payload: { cwd: '/x', transcript_path: '/t' },
     };
     // First call: no existing session -> session_start.
-    const first = reduce(env, '/tmp/x.jsonl', 0, { lookup: () => null, findBySid: () => null });
+    const first = reduce(env, '/tmp/x.jsonl', 0, {
+      lookup: () => null,
+      findBySid: () => null,
+      markProcDone: () => 0,
+    });
     expect(first?.event.kind).toBe('session_start');
 
     // Second call: pretend the session row exists -> session_resume, recovered.
@@ -247,6 +262,7 @@ describe('reducer: session_resume on existing key', () => {
       current_tool: null,
       last_prompt: null,
       observed_parent_pid: null,
+      observed_parent_starttime: null,
       origin: null,
       context_tokens_used: null,
       context_tokens_max: null,
@@ -255,8 +271,75 @@ describe('reducer: session_resume on existing key', () => {
     const second = reduce(env, '/tmp/x.jsonl', 100, {
       lookup: () => fakeRow,
       findBySid: () => fakeRow,
+      markProcDone: () => 0,
     });
     expect(second?.event.kind).toBe('session_resume');
     expect(second?.sessionPatch.state).toBe('recovered');
+  });
+
+  test('stores hook parent pid and starttime from envelope', () => {
+    const env: HookEnvelope = {
+      provider: 'codex',
+      event: 'SessionStart',
+      session_id: 's1',
+      observed_at_ms: 100,
+      parent_pid: 1234,
+      parent_starttime: 987654,
+      payload: { cwd: '/x', transcript_path: '/t' },
+    };
+    const r = reduce(env, '/tmp/x.jsonl', 0, {
+      lookup: () => null,
+      findBySid: () => null,
+      markProcDone: () => 0,
+    });
+    expect(r?.sessionPatch.observed_parent_pid).toBe(1234);
+    expect(r?.sessionPatch.observed_parent_starttime).toBe(987654);
+  });
+
+  test('agy payload recovers conversationId, cwd, transcriptPath, and toolCall name', () => {
+    const env: HookEnvelope = {
+      provider: 'agy',
+      event: 'PreToolUse',
+      session_id: 'unknown',
+      observed_at_ms: 100,
+      payload: {
+        conversationId: '2000470b-86e9-458b-9b2d-ed78d134e92a',
+        workspacePaths: ['/home/chenyi/tools/todo_apps/agent-monitor'],
+        transcriptPath:
+          '/home/chenyi/.gemini/antigravity-cli/brain/2000470b-86e9-458b-9b2d-ed78d134e92a/.system_generated/logs/transcript.jsonl',
+        toolCall: { name: 'list_dir', args: {} },
+      },
+    };
+    const r = reduce(env, '/tmp/agy.jsonl', 0, {
+      lookup: () => null,
+      findBySid: () => null,
+      markProcDone: () => 0,
+    });
+    expect(r?.sessionPatch.session_id).toBe('2000470b-86e9-458b-9b2d-ed78d134e92a');
+    expect(r?.sessionPatch.cwd).toBe('/home/chenyi/tools/todo_apps/agent-monitor');
+    expect(r?.sessionPatch.transcript_path).toContain('/brain/2000470b-86e9-458b-9b2d-ed78d134e92a/');
+    expect(r?.sessionPatch.current_tool).toBe('list_dir');
+    expect(r?.sessionPatch.state).toBe('tool');
+  });
+
+  test('agy PostToolUse with null toolCall is turn_complete', () => {
+    const env: HookEnvelope = {
+      provider: 'agy',
+      event: 'PostToolUse',
+      session_id: 'unknown',
+      observed_at_ms: 100,
+      payload: {
+        conversationId: '2000470b-86e9-458b-9b2d-ed78d134e92a',
+        workspacePaths: ['/repo'],
+        toolCall: null,
+      },
+    };
+    const r = reduce(env, '/tmp/agy.jsonl', 0, {
+      lookup: () => null,
+      findBySid: () => null,
+      markProcDone: () => 0,
+    });
+    expect(r?.event.kind).toBe('turn_complete');
+    expect(r?.sessionPatch.state).toBe('waiting');
   });
 });

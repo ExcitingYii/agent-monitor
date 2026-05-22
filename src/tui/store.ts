@@ -204,10 +204,35 @@ export function visibleKeys(
   const showMcp = opts?.showMcp ?? true;
   const nowMs = opts?.nowMs ?? Date.now();
   const f = filter.trim().toLowerCase();
+  const realByProviderCwd = new Set<string>();
+  const procKeepByProviderCwd = new Map<string, string>();
+
+  for (const k of order) {
+    const r = sessions.get(k);
+    if (!r) continue;
+    const group = `${r.provider}\0${r.cwd ?? ''}`;
+    if (r.origin === 'proc' || r.session_id.startsWith('proc-')) {
+      const prev = procKeepByProviderCwd.get(group);
+      if (!prev) {
+        procKeepByProviderCwd.set(group, k);
+      } else {
+        const a = sessions.get(prev)!;
+        if (r.last_event_at_ms > a.last_event_at_ms) procKeepByProviderCwd.set(group, k);
+      }
+    } else {
+      realByProviderCwd.add(group);
+    }
+  }
 
   const filtered = order.filter((k) => {
     const r = sessions.get(k);
     if (!r) return false;
+    const isProc = r.origin === 'proc' || r.session_id.startsWith('proc-');
+    if (isProc) {
+      const group = `${r.provider}\0${r.cwd ?? ''}`;
+      if (realByProviderCwd.has(group)) return false;
+      if (procKeepByProviderCwd.get(group) !== k) return false;
+    }
 
     if (!showAll) {
       const display = applyLiveness(r, nowMs);

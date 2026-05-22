@@ -40,6 +40,7 @@ function row(over: Partial<SessionRow>): SessionRow {
     current_tool: null,
     last_prompt: null,
     observed_parent_pid: null,
+    observed_parent_starttime: null,
     origin: null,
     context_tokens_used: null,
     context_tokens_max: null,
@@ -137,6 +138,63 @@ describe('visibleKeys filter', () => {
     expect(visibleKeys(order, sessions, 'codex')).toEqual(['c']);
     expect(visibleKeys(order, sessions, 'proj')).toEqual(['a', 'b', 'c']);
     expect(visibleKeys(order, sessions, 'nope')).toEqual([]);
+  });
+
+  test('deduplicates proc placeholders by provider and cwd', () => {
+    const sessions = new Map<string, SessionRow>([
+      [
+        'p1',
+        row({
+          key: 'p1',
+          provider: 'codex',
+          session_id: 'proc-1-100',
+          cwd: '/repo',
+          origin: 'proc',
+          last_event_at_ms: 100,
+        }),
+      ],
+      [
+        'p2',
+        row({
+          key: 'p2',
+          provider: 'codex',
+          session_id: 'proc-2-101',
+          cwd: '/repo',
+          origin: 'proc',
+          last_event_at_ms: 200,
+        }),
+      ],
+      ['real', row({ key: 'real', provider: 'codex', session_id: 'real', cwd: '/other' })],
+    ]);
+    expect(visibleKeys(['p1', 'p2', 'real'], sessions, '')).toEqual(['real', 'p2']);
+  });
+
+  test('hides proc placeholder when real session exists for same provider and cwd', () => {
+    const sessions = new Map<string, SessionRow>([
+      [
+        'proc',
+        row({
+          key: 'proc',
+          provider: 'claude',
+          session_id: 'proc-1-100',
+          cwd: '/repo',
+          origin: 'proc',
+          last_event_at_ms: 200,
+        }),
+      ],
+      [
+        'real',
+        row({
+          key: 'real',
+          provider: 'claude',
+          session_id: 'real',
+          cwd: '/repo',
+          origin: null,
+          last_event_at_ms: 100,
+        }),
+      ],
+    ]);
+    expect(visibleKeys(['proc', 'real'], sessions, '')).toEqual(['real']);
   });
 });
 

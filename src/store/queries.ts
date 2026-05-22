@@ -27,6 +27,7 @@ export interface SessionUpsert {
   current_tool?: string | null;
   last_prompt?: string | null;
   observed_parent_pid?: number | null;
+  observed_parent_starttime?: number | null;
   origin?: string | null;
   context_tokens_used?: number | null;
   context_tokens_max?: number | null;
@@ -37,12 +38,14 @@ const SQL_UPSERT_SESSION = `
 INSERT INTO sessions (
   key, provider, session_id, transcript_path, cwd, model, cli_version,
   pid, process_start_unix, started_at_ms, last_event_at_ms,
-  prior_state, state, current_tool, last_prompt, observed_parent_pid, origin,
+  prior_state, state, current_tool, last_prompt, observed_parent_pid,
+  observed_parent_starttime, origin,
   context_tokens_used, context_tokens_max, context_source
 ) VALUES (
   $key, $provider, $session_id, $transcript_path, $cwd, $model, $cli_version,
   $pid, $process_start_unix, $observed_at_ms, $observed_at_ms,
-  $prior_state, $state, $current_tool, $last_prompt, $observed_parent_pid, $origin,
+  $prior_state, $state, $current_tool, $last_prompt, $observed_parent_pid,
+  $observed_parent_starttime, $origin,
   $context_tokens_used, $context_tokens_max, $context_source
 )
 ON CONFLICT(key) DO UPDATE SET
@@ -58,6 +61,7 @@ ON CONFLICT(key) DO UPDATE SET
   current_tool        = excluded.current_tool,
   last_prompt         = COALESCE(excluded.last_prompt,     sessions.last_prompt),
   observed_parent_pid = COALESCE(excluded.observed_parent_pid, sessions.observed_parent_pid),
+  observed_parent_starttime = COALESCE(excluded.observed_parent_starttime, sessions.observed_parent_starttime),
   origin              = COALESCE(excluded.origin,          sessions.origin),
   context_tokens_used = COALESCE(excluded.context_tokens_used, sessions.context_tokens_used),
   context_tokens_max  = COALESCE(excluded.context_tokens_max,  sessions.context_tokens_max),
@@ -81,6 +85,7 @@ export function upsertSession(row: SessionUpsert): void {
     $current_tool: row.current_tool ?? null,
     $last_prompt: row.last_prompt ?? null,
     $observed_parent_pid: row.observed_parent_pid ?? null,
+    $observed_parent_starttime: row.observed_parent_starttime ?? null,
     $origin: row.origin ?? null,
     $context_tokens_used: row.context_tokens_used ?? null,
     $context_tokens_max: row.context_tokens_max ?? null,
@@ -114,6 +119,58 @@ export function findSessionByProviderAndId(
     SQL_FIND_SESSION_BY_PROVIDER_SID,
   ).get({ $provider: provider, $session_id: sessionId });
   return (row as SessionRow | null) ?? null;
+}
+
+const SQL_FIND_REAL_SESSION_BY_PARENT = `
+SELECT * FROM sessions
+WHERE provider = $provider
+  AND observed_parent_pid = $pid
+  AND observed_parent_starttime = $starttime
+  AND COALESCE(origin, '') != 'proc'
+  AND session_id NOT LIKE 'proc-%'
+  AND state NOT IN ('done', 'dead')
+ORDER BY last_event_at_ms DESC
+LIMIT 1
+`;
+
+export function findRealSessionByObservedParent(
+  provider: SessionRow['provider'],
+  pid: number,
+  starttime: number,
+): SessionRow | null {
+  const row = prepare<SessionRow, [{ $provider: string; $pid: number; $starttime: number }]>(
+    SQL_FIND_REAL_SESSION_BY_PARENT,
+  ).get({ $provider: provider, $pid: pid, $starttime: starttime });
+  return (row as SessionRow | null) ?? null;
+}
+
+const SQL_MARK_PROC_PLACEHOLDERS_DONE = `
+UPDATE sessions
+SET
+  state = 'done',
+  prior_state = NULL,
+  current_tool = NULL,
+  last_event_at_ms = MAX(last_event_at_ms, $observed_at_ms)
+WHERE provider = $provider
+  AND observed_parent_pid = $pid
+  AND observed_parent_starttime = $starttime
+  AND (origin = 'proc' OR session_id LIKE 'proc-%')
+  AND state NOT IN ('done', 'dead')
+`;
+
+export function markProcPlaceholdersDone(
+  provider: SessionRow['provider'],
+  pid: number,
+  starttime: number,
+  observedAtMs: number,
+): number {
+  const info = prepare(SQL_MARK_PROC_PLACEHOLDERS_DONE).run({
+    $provider: provider,
+    $pid: pid,
+    $starttime: starttime,
+    $observed_at_ms: observedAtMs,
+  });
+  return info.changes;
 }
 
 // "Active" = not done/dead/stale. Used by the doctor command and the TUI grid.

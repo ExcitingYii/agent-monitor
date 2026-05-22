@@ -37,7 +37,8 @@ export interface HookEnvelope {
   payload_truncated?: true;
   payload_bytes?: number;
   payload_prefix?: string;
-  parent_pid?: number; // $PPID of the hook process (M6, diagnostic only)
+  parent_pid?: number; // $PPID of the hook process
+  parent_starttime?: number; // /proc/$PPID/stat field 22, guards PID reuse
 }
 
 // Reducer output: a single normalized event plus optional session-row mutations.
@@ -65,6 +66,7 @@ export interface EventMeta {
   tool_name?: string;
   user_prompt?: string;
   observed_parent_pid?: number;
+  observed_parent_starttime?: number;
 }
 
 // SQLite sessions row.
@@ -85,9 +87,10 @@ export interface SessionRow {
   current_tool: string | null;
   last_prompt: string | null;
   observed_parent_pid: number | null;
-  // Codex sessions carry a `source` in session_meta: 'cli' (interactive),
-  // 'exec' (one-shot codex exec), 'mcp' (spawned by another agent via MCP).
-  // null when unknown (Claude sessions or pre-migration rows).
+  observed_parent_starttime: number | null;
+  // Session origin hint: Codex session_meta source ('cli' / 'exec' / 'mcp'),
+  // or 'proc' for a temporary row discovered from /proc before hooks fire.
+  // null when unknown.
   origin: string | null;
   // Current context load, not lifetime tokens. Source is either provider-
   // reported (Codex) or inferred from the model table (Claude).

@@ -16,12 +16,15 @@ BYTES=$(wc -c < "$TMP")
 # vars are NOT reliable.
 SESSION_ID=""
 if command -v jq >/dev/null 2>&1; then
-  SESSION_ID=$(jq -r '.session_id // empty' "$TMP" 2>/dev/null) || SESSION_ID=""
+  SESSION_ID=$(jq -r '.session_id // .conversationId // .conversation_id // empty' "$TMP" 2>/dev/null) || SESSION_ID=""
 fi
 if [ -z "$SESSION_ID" ]; then
   # Fallback: small tolerant pattern. Real session_ids are UUIDs with no
   # quote escaping, so this works in practice.
   SESSION_ID=$(sed -n 's/.*"session_id":"\([^"]*\)".*/\1/p' "$TMP" | head -n1)
+fi
+if [ -z "$SESSION_ID" ]; then
+  SESSION_ID=$(sed -n 's/.*"conversationId":"\([^"]*\)".*/\1/p' "$TMP" | head -n1)
 fi
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown"
 
@@ -33,15 +36,27 @@ SPOOL="$SPOOL_DIR/$(date -u +%Y%m%d).jsonl"
 TS_MS=$(date +%s%3N)
 
 # M6: $PPID of the hook process is the agent CLI's PID (claude / codex). Used
-# only as diagnostic metadata on the sessions row -- never drives UI state.
+# as liveness metadata on the sessions row. We also capture /proc stat field
+# 22 (process starttime in clock ticks) so the UI can guard against PID reuse.
 PARENT_PID="$PPID"
+PARENT_STARTTIME_JSON="null"
+if [ -r "/proc/$PARENT_PID/stat" ]; then
+  PARENT_STAT=$(sed 's/^.*) //' "/proc/$PARENT_PID/stat" 2>/dev/null) || PARENT_STAT=""
+  set -- $PARENT_STAT
+  shift 19 2>/dev/null || true
+  PARENT_STARTTIME="${1:-}"
+  case "$PARENT_STARTTIME" in
+    ''|*[!0-9]*) PARENT_STARTTIME_JSON="null" ;;
+    *) PARENT_STARTTIME_JSON="$PARENT_STARTTIME" ;;
+  esac
+fi
 
 if [ "$BYTES" -gt "$MAX_PAYLOAD_BYTES" ]; then
   PREFIX=$(head -c 128 "$TMP" | sed 's/"/\\"/g')
-  printf '{"provider":"%s","event":"%s","session_id":"%s","observed_at_ms":%s,"payload_truncated":true,"payload_bytes":%s,"payload_prefix":"%s","parent_pid":%s}\n' \
-    "$PROVIDER" "$EVENT" "$SESSION_ID" "$TS_MS" "$BYTES" "$PREFIX" "$PARENT_PID" >> "$SPOOL" 2>/dev/null || true
+  printf '{"provider":"%s","event":"%s","session_id":"%s","observed_at_ms":%s,"payload_truncated":true,"payload_bytes":%s,"payload_prefix":"%s","parent_pid":%s,"parent_starttime":%s}\n' \
+    "$PROVIDER" "$EVENT" "$SESSION_ID" "$TS_MS" "$BYTES" "$PREFIX" "$PARENT_PID" "$PARENT_STARTTIME_JSON" >> "$SPOOL" 2>/dev/null || true
 else
-  printf '{"provider":"%s","event":"%s","session_id":"%s","observed_at_ms":%s,"payload":%s,"parent_pid":%s}\n' \
-    "$PROVIDER" "$EVENT" "$SESSION_ID" "$TS_MS" "$(cat "$TMP")" "$PARENT_PID" >> "$SPOOL" 2>/dev/null || true
+  printf '{"provider":"%s","event":"%s","session_id":"%s","observed_at_ms":%s,"payload":%s,"parent_pid":%s,"parent_starttime":%s}\n' \
+    "$PROVIDER" "$EVENT" "$SESSION_ID" "$TS_MS" "$(cat "$TMP")" "$PARENT_PID" "$PARENT_STARTTIME_JSON" >> "$SPOOL" 2>/dev/null || true
 fi
 exit 0

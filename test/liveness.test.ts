@@ -3,32 +3,12 @@
 // We synthesize SessionRow objects via a small factory rather than touching
 // the DB; deriveDisplayState is pure (row + clock -> SessionState).
 
-import { mock } from 'bun:test';
+let mockProcs: Record<
+  string,
+  { comm: string; cmdline?: string; fds?: Record<string, string>; starttime?: number }
+> = {};
 
-let mockProcs: Record<string, { comm: string; cmdline?: string; fds?: Record<string, string> }> = {};
-
-mock.module('node:fs', () => ({
-  readdirSync: (dir: string) => {
-    if (dir === '/proc') return Object.keys(mockProcs);
-    const m = dir.match(/^\/proc\/(\d+)\/fd$/);
-    if (m && mockProcs[m[1]]?.fds) return Object.keys(mockProcs[m[1]].fds!);
-    throw new Error('ENOENT');
-  },
-  readFileSync: (file: string) => {
-    const mComm = file.match(/^\/proc\/(\d+)\/comm$/);
-    if (mComm && mockProcs[mComm[1]]) return mockProcs[mComm[1]].comm;
-    const mCmd = file.match(/^\/proc\/(\d+)\/cmdline$/);
-    if (mCmd && mockProcs[mCmd[1]]?.cmdline !== undefined) return mockProcs[mCmd[1]].cmdline!;
-    throw new Error('ENOENT');
-  },
-  readlinkSync: (file: string) => {
-    const m = file.match(/^\/proc\/(\d+)\/fd\/(\d+)$/);
-    if (m && mockProcs[m[1]]?.fds?.[m[2]] !== undefined) return mockProcs[m[1]].fds![m[2]];
-    throw new Error('ENOENT');
-  },
-}));
-
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   ACTIVE_WINDOW_MS,
   FRESH_EVENT_GRACE_MS,
@@ -36,7 +16,9 @@ import {
   deriveDisplayState,
   deriveLiveState,
   isAgySessionAlive,
+  isObservedParentAlive,
   resetAliveCacheForTests,
+  setLivenessFsForTests,
 } from '../src/liveness.ts';
 import type { SessionRow, SessionState } from '../src/types.ts';
 
@@ -58,6 +40,7 @@ function row(over: Partial<SessionRow>): SessionRow {
     current_tool: null,
     last_prompt: null,
     observed_parent_pid: null,
+    observed_parent_starttime: null,
     origin: null,
     context_tokens_used: null,
     context_tokens_max: null,
@@ -65,6 +48,41 @@ function row(over: Partial<SessionRow>): SessionRow {
     ...over,
   };
 }
+
+function installMockProcFs(): void {
+  setLivenessFsForTests({
+    readdirSync: (dir: string) => {
+      if (dir === '/proc') return Object.keys(mockProcs) as never;
+      const m = dir.match(/^\/proc\/(\d+)\/fd$/);
+      if (m && mockProcs[m[1]]?.fds) return Object.keys(mockProcs[m[1]].fds!) as never;
+      throw new Error('ENOENT');
+    },
+    readFileSync: (file: string) => {
+      const mComm = file.match(/^\/proc\/(\d+)\/comm$/);
+      if (mComm && mockProcs[mComm[1]]) return mockProcs[mComm[1]].comm;
+      const mCmd = file.match(/^\/proc\/(\d+)\/cmdline$/);
+      if (mCmd && mockProcs[mCmd[1]]?.cmdline !== undefined) return mockProcs[mCmd[1]].cmdline!;
+      const mStat = file.match(/^\/proc\/(\d+)\/stat$/);
+      if (mStat && mockProcs[mStat[1]]?.starttime !== undefined) {
+        const p = mockProcs[mStat[1]]!;
+        const fields = Array.from({ length: 22 }, () => '0');
+        fields[0] = 'S';
+        fields[19] = String(p.starttime);
+        return `${mStat[1]} (${p.comm}) ${fields.join(' ')}`;
+      }
+      throw new Error('ENOENT');
+    },
+    readlinkSync: (file: string) => {
+      const m = file.match(/^\/proc\/(\d+)\/fd\/(\d+)$/);
+      if (m && mockProcs[m[1]]?.fds?.[m[2]] !== undefined) return mockProcs[m[1]].fds![m[2]];
+      throw new Error('ENOENT');
+    },
+  } as never);
+}
+
+afterEach(() => {
+  setLivenessFsForTests(null);
+});
 
 describe('deriveDisplayState', () => {
   test('done is terminal — always returns done regardless of age', () => {
@@ -164,10 +182,53 @@ describe('deriveLiveState (combines /proc proof with fresh-event grace)', () => 
   });
 });
 
+describe('observed parent PID liveness', () => {
+  beforeEach(() => {
+    mockProcs = {};
+    installMockProcFs();
+  });
+
+  test('isObservedParentAlive returns true when pid starttime matches', () => {
+    mockProcs['100'] = { comm: 'node-wrapper', starttime: 123456 };
+    expect(isObservedParentAlive(100, 123456)).toBe(true);
+  });
+
+  test('isObservedParentAlive returns false when pid was reused', () => {
+    mockProcs['100'] = { comm: 'node-wrapper', starttime: 999999 };
+    expect(isObservedParentAlive(100, 123456)).toBe(false);
+  });
+
+  test('applyLiveness trusts observed parent even without provider fd evidence', () => {
+    const r = row({
+      provider: 'codex',
+      session_id: '12345678-1234-1234-1234-1234567890ab',
+      state: 'thinking',
+      last_event_at_ms: 0,
+      observed_parent_pid: 100,
+      observed_parent_starttime: 123456,
+    });
+    mockProcs['100'] = { comm: 'node-wrapper', starttime: 123456 };
+    expect(applyLiveness(r, FRESH_EVENT_GRACE_MS + 1)).toBe('thinking');
+  });
+
+  test('applyLiveness rejects reused observed parent after grace', () => {
+    const r = row({
+      provider: 'codex',
+      session_id: '12345678-1234-1234-1234-1234567890ab',
+      state: 'thinking',
+      last_event_at_ms: 0,
+      observed_parent_pid: 100,
+      observed_parent_starttime: 123456,
+    });
+    mockProcs['100'] = { comm: 'node-wrapper', starttime: 999999 };
+    expect(applyLiveness(r, FRESH_EVENT_GRACE_MS + 1)).toBe('done');
+  });
+});
+
 describe('agy liveness via /proc and fd walk', () => {
   beforeEach(() => {
     mockProcs = {};
-    resetAliveCacheForTests();
+    installMockProcFs();
   });
 
   test('isAgySessionAlive returns false if sessionId is empty', () => {

@@ -1,7 +1,8 @@
-// Pure reducer: HookEnvelope -> { NormalizedEvent, optional sessionPatch }.
+// Reducer: HookEnvelope -> { NormalizedEvent, optional sessionPatch }.
 //
-// "Pure" means: no I/O, no DB access, deterministic on inputs. The spool
-// tailer is responsible for actually persisting the result.
+// Mostly deterministic on inputs. It consults existing session rows to merge
+// hook events that omit transcript_path, and retires temporary proc-discovery
+// placeholders once a real hook identifies the same parent process.
 //
 // The mapping table mirrors the "Normalized Event Kinds" table in the plan.
 // Anything we can't map confidently is dropped (returns null) -- the indexer
@@ -19,6 +20,7 @@ const SAFE_SID_RE = /^[\x20-\x7e]+$/;
 import {
   findSessionByProviderAndId,
   getSessionByKey,
+  markProcPlaceholdersDone,
 } from '../store/queries.ts';
 import type {
   EventMeta,
@@ -56,6 +58,7 @@ export interface SessionUpsertPatch {
   process_start_unix: number | null;
   last_prompt: string | null;
   observed_parent_pid: number | null;
+  observed_parent_starttime: number | null;
 }
 
 // --- payload shape helpers ---------------------------------------------------
@@ -73,6 +76,9 @@ function asString(v: unknown): string | null {
 }
 function asNumber(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+function firstString(v: unknown): string | null {
+  return Array.isArray(v) && typeof v[0] === 'string' ? v[0] : null;
 }
 
 // --- Notification ambiguity --------------------------------------------------
@@ -133,6 +139,7 @@ function mapHookEventToKind(
     case 'PreToolUse':
       return 'tool_call_start';
     case 'PostToolUse':
+      if (env.provider === 'agy' && payload?.toolCall == null) return 'turn_complete';
       return 'tool_call_end';
     case 'Notification':
       return isPermissionNotification(payload) ? 'permission_request' : 'user_attention';
@@ -165,7 +172,10 @@ function extractMeta(env: HookEnvelope, payload: Json | null): EventMeta {
   if (!payload) return meta;
 
   // cwd: top-level on Claude rollout rows; sometimes nested under `payload`.
-  const cwd = asString(payload.cwd) ?? asString(asObject(payload.context)?.cwd);
+  const cwd =
+    asString(payload.cwd) ??
+    asString(asObject(payload.context)?.cwd) ??
+    firstString(payload.workspacePaths);
   if (cwd) meta.cwd = cwd;
 
   // model: may be a string or an object with `id`.
@@ -185,12 +195,15 @@ function extractMeta(env: HookEnvelope, payload: Json | null): EventMeta {
   if (startUnix != null) meta.process_start_unix = startUnix;
 
   const transcript =
-    asString(payload.transcript_path) ?? asString(payload.session_file);
+    asString(payload.transcript_path) ??
+    asString(payload.transcriptPath) ??
+    asString(payload.session_file);
   if (transcript) meta.transcript_path = transcript;
 
   const toolName =
     asString(payload.tool_name) ??
     asString(asObject(payload.tool)?.name) ??
+    asString(asObject(payload.toolCall)?.name) ??
     asString(payload.name);
   if (toolName) meta.tool_name = toolName;
 
@@ -241,6 +254,12 @@ export type FindSessionBySid = (
   provider: HookEnvelope['provider'],
   sessionId: string,
 ) => SessionRow | null;
+export type MarkProcPlaceholdersDone = (
+  provider: HookEnvelope['provider'],
+  pid: number,
+  starttime: number,
+  observedAtMs: number,
+) => number;
 
 export function reduce(
   env: HookEnvelope,
@@ -250,19 +269,29 @@ export function reduce(
     source?: 'hook' | 'rollout';
     lookup?: SessionLookup;
     findBySid?: FindSessionBySid;
+    markProcDone?: MarkProcPlaceholdersDone;
   } = {},
 ): ReducedEvent | null {
   const lookup = opts.lookup ?? getSessionByKey;
   const findBySid = opts.findBySid ?? findSessionByProviderAndId;
+  const markProcDone = opts.markProcDone ?? markProcPlaceholdersDone;
   const source = opts.source ?? 'hook';
+  const payload = asObject(env.payload);
+  const payloadSessionId =
+    asString(payload?.session_id) ??
+    asString(payload?.conversationId) ??
+    asString(payload?.conversation_id);
+  const sessionId =
+    env.session_id && env.session_id !== 'unknown'
+      ? env.session_id
+      : payloadSessionId ?? env.session_id;
 
   // Defensive: skip events whose session_id has non-printable bytes. Hook
   // scripts can emit corrupted ids when stdin is truncated mid-UTF-8 — those
   // values produce phantom rows like `claude:<uuid>\xef\xbf\xbd` that the
   // indexer can never reconcile away. Quietly drop them.
-  if (!SAFE_SID_RE.test(env.session_id)) return null;
+  if (!SAFE_SID_RE.test(sessionId)) return null;
 
-  const payload = asObject(env.payload);
   let kind = mapHookEventToKind(env, payload);
   if (!kind) return null; // unrecognized hook event -- skip.
 
@@ -274,10 +303,10 @@ export function reduce(
   // payload (or null) if we have no prior knowledge.
   let transcriptPath: string | null = meta.transcript_path ?? null;
   if (!transcriptPath) {
-    const prior = findBySid(env.provider, env.session_id);
+    const prior = findBySid(env.provider, sessionId);
     if (prior?.transcript_path) transcriptPath = prior.transcript_path;
   }
-  const key = sessionKey(env.provider, env.session_id, transcriptPath);
+  const key = sessionKey(env.provider, sessionId, transcriptPath);
 
   // SessionStart -> if we've seen this key before, treat as resume (the agent
   // restarted or the user reopened the same session_id). The plan calls this
@@ -308,7 +337,7 @@ export function reduce(
   const sessionPatch: SessionUpsertPatch = {
     key,
     provider: env.provider,
-    session_id: env.session_id,
+    session_id: sessionId,
     observed_at_ms: observed,
     state: statePatch.state ?? existing?.state ?? 'waiting',
     prior_state:
@@ -322,13 +351,30 @@ export function reduce(
     pid: meta.pid ?? null,
     process_start_unix: meta.process_start_unix ?? null,
     last_prompt: statePatch.last_prompt ?? null,
-    // M6: parent_pid travels on the envelope (top-level), not the payload.
-    // Stored on sessions as diagnostic metadata only; never drives UI state.
+    // M6: parent process metadata travels on the envelope (top-level), not the
+    // payload. Stored on sessions so liveness can prove quiet processes alive.
     observed_parent_pid:
       typeof env.parent_pid === 'number' && Number.isFinite(env.parent_pid)
         ? env.parent_pid
         : null,
+    observed_parent_starttime:
+      typeof env.parent_starttime === 'number' && Number.isFinite(env.parent_starttime)
+        ? env.parent_starttime
+        : null,
   };
+
+  if (
+    sessionPatch.observed_parent_pid != null &&
+    sessionPatch.observed_parent_starttime != null &&
+    !sessionId.startsWith('proc-')
+  ) {
+    markProcDone(
+      env.provider,
+      sessionPatch.observed_parent_pid,
+      sessionPatch.observed_parent_starttime,
+      observed,
+    );
+  }
 
   return { event, sessionPatch };
 }

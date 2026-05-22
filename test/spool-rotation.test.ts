@@ -55,8 +55,9 @@ function seedEvents(
     `INSERT OR IGNORE INTO sessions (
       key, provider, session_id, transcript_path, cwd, model, cli_version,
       pid, process_start_unix, started_at_ms, last_event_at_ms,
-      prior_state, state, current_tool, last_prompt
-    ) VALUES (?, 'claude', 'sid', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, NULL, 'thinking', NULL, NULL)`,
+      prior_state, state, current_tool, last_prompt, observed_parent_pid,
+      observed_parent_starttime
+    ) VALUES (?, 'claude', 'sid', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, NULL, 'thinking', NULL, NULL, NULL, NULL)`,
   ).run('sk');
   const insert = db.prepare(
     `INSERT INTO events (session_key, observed_at_ms, provider_ts, source, source_path, source_offset, kind, payload_json)
