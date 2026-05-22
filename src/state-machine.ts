@@ -65,7 +65,6 @@ export function nextState(
   event: NormalizedEvent,
 ): StatePatch {
   const prevState: SessionState = prev?.state ?? INITIAL_STATE;
-  const prevPrior: SessionState | null = prev?.prior_state ?? null;
   const toolName = event.meta?.tool_name ?? null;
 
   switch (event.kind) {
@@ -88,41 +87,32 @@ export function nextState(
       if (event.meta?.user_prompt) {
         patch.last_prompt = summarizePrompt(event.meta.user_prompt);
       }
-      // user_prompt is an escape event for permission -> falls through to the
-      // post-switch resolver, but we still want thinking, not prior_state.
-      // (If a user_prompt arrives during permission, it means the user typed
-      // past the prompt -- treat as a fresh turn, not a resume.)
       patch.prior_state = null;
-      return resolveRecovered(prevState, patch);
+      return patch;
     }
 
     case 'tool_call_start': {
       if (prevState === 'permission') {
-        // Escape: pop back to whatever we were doing before the prompt.
-        // tool_call_start specifically means "tool is starting", so override
-        // prior with `tool` and stash the tool name.
         return {
           state: 'tool',
           current_tool: toolName,
           prior_state: null,
         };
       }
-      return resolveRecovered(prevState, {
+      return {
         state: 'tool',
         current_tool: toolName,
-      });
+      };
     }
 
     case 'tool_call_end': {
       if (prevState === 'permission') {
-        // Tool finished while we thought we were on permission -- the prompt
-        // resolved. Return to thinking (the natural post-tool state).
         return { state: 'thinking', current_tool: null, prior_state: null };
       }
-      return resolveRecovered(prevState, {
+      return {
         state: 'thinking',
         current_tool: null,
-      });
+      };
     }
 
     case 'permission_request': {
@@ -147,10 +137,10 @@ export function nextState(
       if (prevState === 'permission') {
         return { state: 'waiting', prior_state: null, current_tool: null };
       }
-      return resolveRecovered(prevState, {
+      return {
         state: 'waiting',
         current_tool: null,
-      });
+      };
     }
 
     case 'session_stop': {
@@ -162,26 +152,9 @@ export function nextState(
     }
 
     default: {
-      // Exhaustive guard: if a new NormalizedEventKind is added without a case
-      // here, TypeScript will flag it.
       const _exhaustive: never = event.kind;
       void _exhaustive;
       return {};
     }
   }
-
-  // Unreachable; kept to silence "no return in some path" if the compiler
-  // can't follow the switch's exhaustiveness across nested helpers.
-  void prevPrior;
-}
-
-// Helper: if we were in `recovered`, the first known-kind event resolves us to
-// the patch's target state. Otherwise just apply the patch as-is. This keeps
-// the resolution logic in one place rather than sprinkled through every case.
-function resolveRecovered(prevState: SessionState, patch: StatePatch): StatePatch {
-  if (prevState === 'recovered') {
-    // The patch already targets a real lifecycle state; nothing extra to do.
-    return patch;
-  }
-  return patch;
 }

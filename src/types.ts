@@ -65,8 +65,6 @@ export interface EventMeta {
   transcript_path?: string;
   tool_name?: string;
   user_prompt?: string;
-  observed_parent_pid?: number;
-  observed_parent_starttime?: number;
 }
 
 // SQLite sessions row.
