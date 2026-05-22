@@ -173,6 +173,72 @@ export function markProcPlaceholdersDone(
   return info.changes;
 }
 
+// Some provider approval flows can leave the session row on `permission` when
+// the follow-up event lands only in the rollout stream or after a writer-lock
+// handoff. On read, derive a display row from the newest later lifecycle event
+// for that same session so the TUI does not keep showing a stale approval card.
+const SQL_CLEAR_RESOLVED_PERMISSIONS = `
+UPDATE sessions
+SET
+  state = CASE latest.kind
+    WHEN 'tool_call_start' THEN 'tool'
+    WHEN 'tool_call_end' THEN 'thinking'
+    WHEN 'turn_complete' THEN 'waiting'
+    WHEN 'user_prompt' THEN 'thinking'
+    WHEN 'session_stop' THEN 'done'
+    ELSE sessions.state
+  END,
+  prior_state = NULL,
+  current_tool = CASE latest.kind
+    WHEN 'tool_call_start' THEN COALESCE(
+      json_extract(latest.payload_json, '$.tool_name'),
+      json_extract(latest.payload_json, '$.toolName'),
+      json_extract(latest.payload_json, '$.name'),
+      sessions.current_tool
+    )
+    WHEN 'tool_call_end' THEN NULL
+    WHEN 'turn_complete' THEN NULL
+    WHEN 'user_prompt' THEN NULL
+    WHEN 'session_stop' THEN NULL
+    ELSE sessions.current_tool
+  END,
+  last_event_at_ms = MAX(sessions.last_event_at_ms, latest.observed_at_ms)
+FROM (
+  SELECT e.session_key, e.kind, e.observed_at_ms, e.payload_json
+  FROM events e
+  JOIN (
+    SELECT session_key, MAX(observed_at_ms) AS observed_at_ms
+    FROM events
+    WHERE kind IN (
+      'tool_call_start',
+      'tool_call_end',
+      'turn_complete',
+      'user_prompt',
+      'session_stop'
+    )
+    GROUP BY session_key
+  ) m
+    ON m.session_key = e.session_key
+   AND m.observed_at_ms = e.observed_at_ms
+  WHERE e.kind IN (
+    'tool_call_start',
+    'tool_call_end',
+    'turn_complete',
+    'user_prompt',
+    'session_stop'
+  )
+  GROUP BY e.session_key
+) AS latest
+WHERE sessions.key = latest.session_key
+  AND sessions.state = 'permission'
+  AND latest.observed_at_ms > sessions.last_event_at_ms
+`;
+
+export function clearResolvedPermissions(): number {
+  const info = prepare(SQL_CLEAR_RESOLVED_PERMISSIONS).run();
+  return info.changes;
+}
+
 // "Active" = not done/dead/stale. Used by the doctor command and the TUI grid.
 const SQL_ACTIVE_SESSIONS = `
 SELECT * FROM sessions

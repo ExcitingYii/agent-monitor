@@ -36,6 +36,7 @@ import {
   releaseWriter,
   tryAcquireWriter,
 } from './writer-lock.ts';
+import { clearResolvedPermissions } from '../store/queries.ts';
 
 export interface AmbientStatus {
   // Wall-clock at the moment the most recent drain finished. null until 1st pass.
@@ -72,6 +73,7 @@ export interface AmbientOptions {
   drainFn?: () => Promise<DrainStats>;
   procDiscoveryFn?: () => Promise<ProcDiscoveryStats>;
   reconcileFn?: () => Promise<ReconcileStats>;
+  permissionCleanupFn?: () => number;
   // Skip the writer-lock check (used by tests to exercise the drain logic
   // without touching the real ~/.local/state/agent-monitor/indexer.lock).
   bypassWriterLock?: boolean;
@@ -104,6 +106,8 @@ export function startAmbientIndexer(opts: AmbientOptions = {}): AmbientHandle {
   const procDiscovery = opts.procDiscoveryFn ?? defaultDiscoverProcSessionsOnce;
   const reconcile = opts.reconcileFn ?? defaultRunReconcileOnce;
   const bypassLock = opts.bypassWriterLock ?? false;
+  const permissionCleanup =
+    opts.permissionCleanupFn ?? (bypassLock ? (() => 0) : clearResolvedPermissions);
 
   const status: AmbientStatus = emptyStatus();
 
@@ -155,6 +159,7 @@ export function startAmbientIndexer(opts: AmbientOptions = {}): AmbientHandle {
         }
         const s = await drain();
         await procDiscovery();
+        permissionCleanup();
         status.lastDrainAt = Date.now();
         status.lastDrainStats = s;
         status.drainBacklogLines = s.linesIngested;
@@ -182,6 +187,7 @@ export function startAmbientIndexer(opts: AmbientOptions = {}): AmbientHandle {
           return;
         }
         const s = await reconcile();
+        permissionCleanup();
         status.lastReconcileAt = Date.now();
         status.lastReconcileStats = s;
         if (status.lastError?.source === 'reconcile') status.lastError = null;

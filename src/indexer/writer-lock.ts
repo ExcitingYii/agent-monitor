@@ -22,10 +22,36 @@ import { PATHS } from '../paths.ts';
 const lockPath = path.join(PATHS.state, 'indexer.lock');
 let heldFd: number | null = null;
 
+function splitCmdline(raw: string): string[] {
+  return raw.split('\0').filter(Boolean);
+}
+
+function isCliEntrypoint(arg: string): boolean {
+  const base = path.basename(arg);
+  return (
+    base === 'agent-monitor' ||
+    arg.endsWith('/bin/agent-monitor') ||
+    arg === 'src/cli.ts' ||
+    arg.endsWith('/src/cli.ts')
+  );
+}
+
+// Exported for tests: identify the actual monitor TUI command, not merely any
+// process whose cwd or sandbox arguments happen to mention the repo name.
+export function commandLooksLikeAgentMonitorTui(rawCmdline: string): boolean {
+  const args = splitCmdline(rawCmdline);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (isCliEntrypoint(arg) && args[i + 1] === 'tui') return true;
+  }
+  return false;
+}
+
 // Extra safety against PID reuse: kill(pid, 0) succeeds for ANY live process
 // with that PID, including unrelated programs the kernel reused the slot for.
-// We additionally verify the cmdline mentions our entry path so we don't keep
-// deferring to e.g. a long-lived `vim` that landed on the previous writer's PID.
+// We additionally verify the cmdline is the monitor TUI command so we don't
+// defer to an unrelated process that merely mentions this repo in cwd/sandbox
+// arguments.
 function processIsOurs(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false;
   try {
@@ -35,8 +61,7 @@ function processIsOurs(pid: number): boolean {
   }
   try {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
-    // Match: contains src/cli.ts (the TUI entry) or the installed bin name.
-    return cmdline.includes('src/cli.ts') || cmdline.includes('agent-monitor');
+    return commandLooksLikeAgentMonitorTui(cmdline);
   } catch {
     // /proc unreadable; conservatively treat as ours (don't steal).
     return true;
